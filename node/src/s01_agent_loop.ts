@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import OpenAI from "openai";
-import { spawn } from "child_process";
 import dotenv from "dotenv";
 import * as readline from "readline";
+import { runBash, WORKDIR } from "./common";
 
 dotenv.config();
 const MODEL = process.env.MODEL_ID || "deepseek-reasoner";
@@ -12,7 +12,6 @@ const client = new OpenAI({
   baseURL: process.env.DEEPSEEK_BASE_URL,
 });
 
-const WORKDIR = process.cwd();
 const SYSTEM = `你是位于 ${WORKDIR} 的编码代理。使用 bash 解决任务，只执行不解释。`;
 
 const TOOLS: OpenAI.ChatCompletionTool[] = [
@@ -31,39 +30,6 @@ const TOOLS: OpenAI.ChatCompletionTool[] = [
     },
   },
 ];
-
-function runBash(command: string): Promise<string> {
-  const dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
-  if (dangerous.some((d) => command.includes(d))) {
-    return Promise.resolve("Error: Dangerous command blocked");
-  }
-
-  return new Promise((resolve) => {
-    const shell = process.platform === "win32" ? "powershell.exe" : "bash";
-    const shellArgs = process.platform === "win32" ? ["-Command", command] : ["-c", command];
-    const child = spawn(shell, shellArgs, { timeout: 120000 });
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout?.on("data", (data) => {
-      stdout += data.toString();
-    });
-
-    child.stderr?.on("data", (data) => {
-      stderr += data.toString();
-    });
-
-    child.on("close", (code) => {
-      const output = (stdout + stderr).trim();
-      resolve(output ? output.slice(0, 50000) : "(no output)");
-    });
-
-    child.on("error", (err) => {
-      resolve(`Error: ${err.message}`);
-    });
-  });
-}
 
 // -- 核心模式：一个循环调用工具直到模型停止的 while 循环 --
 async function agentLoop(messages: OpenAI.ChatCompletionMessageParam[]): Promise<void> {
@@ -133,5 +99,4 @@ async function main() {
 
   rl.close();
 }
-
 main().catch(console.error);

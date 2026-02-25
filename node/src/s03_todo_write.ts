@@ -1,11 +1,9 @@
 #!/usr/bin/env node
 
 import Anthropic from "@anthropic-ai/sdk";
-import { spawn } from "child_process";
 import dotenv from "dotenv";
-import * as fs from "fs";
-import * as path from "path";
 import * as readline from "readline";
+import { runBash, runEdit, runRead, runWrite, WORKDIR } from "./common";
 
 dotenv.config();
 const MODEL = process.env.MODEL_ID || "deepseek-reasoner";
@@ -14,7 +12,6 @@ const client = new Anthropic({
   baseURL: process.env.ANTHROPIC_BASE_URL,
 });
 
-const WORKDIR = process.cwd();
 const SYSTEM = `你是一个位于 ${WORKDIR} 的编码代理。
 使用 todo 工具来规划多步骤任务。开始前标记为 in_progress，完成后标记为 completed。
 优先使用工具而非文本描述。`;
@@ -25,7 +22,6 @@ interface TodoItem {
   text: string;
   status: "pending" | "in_progress" | "completed";
 }
-
 class TodoManager {
   private items: TodoItem[] = [];
 
@@ -86,89 +82,9 @@ class TodoManager {
     return lines.join("\n");
   }
 }
-
 const TODO = new TodoManager();
 
 // -- 工具实现 --
-function safePath(p: string): string {
-  const resolved = path.resolve(WORKDIR, p);
-  if (!resolved.startsWith(WORKDIR)) {
-    throw new Error(`Path escapes workspace: ${p}`);
-  }
-  return resolved;
-}
-
-function runBash(command: string): Promise<string> {
-  const dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
-  if (dangerous.some((d) => command.includes(d))) {
-    return Promise.resolve("Error: Dangerous command blocked");
-  }
-
-  return new Promise((resolve) => {
-    const shell = process.platform === "win32" ? "powershell.exe" : "bash";
-    const shellArgs = process.platform === "win32" ? ["-Command", command] : ["-c", command];
-    const child = spawn(shell, shellArgs, { timeout: 120000 });
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout?.on("data", (data) => {
-      stdout += data.toString();
-    });
-
-    child.stderr?.on("data", (data) => {
-      stderr += data.toString();
-    });
-
-    child.on("close", (code) => {
-      const output = (stdout + stderr).trim();
-      resolve(output ? output.slice(0, 50000) : "(no output)");
-    });
-
-    child.on("error", (err) => {
-      resolve(`Error: ${err.message}`);
-    });
-  });
-}
-
-function runRead(filePath: string, limit?: number): string {
-  try {
-    const content = fs.readFileSync(safePath(filePath), "utf-8");
-    let lines = content.split("\n");
-    if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more)`];
-    }
-    return lines.join("\n").slice(0, 50000);
-  } catch (error) {
-    return `Error: ${(error as Error).message}`;
-  }
-}
-
-function runWrite(filePath: string, content: string): string {
-  try {
-    const fp = safePath(filePath);
-    fs.mkdirSync(path.dirname(fp), { recursive: true });
-    fs.writeFileSync(fp, content, "utf-8");
-    return `Wrote ${content.length} bytes`;
-  } catch (error) {
-    return `Error: ${(error as Error).message}`;
-  }
-}
-
-function runEdit(filePath: string, oldText: string, newText: string): string {
-  try {
-    const fp = safePath(filePath);
-    const content = fs.readFileSync(fp, "utf-8");
-    if (!content.includes(oldText)) {
-      return `Error: Text not found in ${filePath}`;
-    }
-    fs.writeFileSync(fp, content.replace(oldText, newText), "utf-8");
-    return `Edited ${filePath}`;
-  } catch (error) {
-    return `Error: ${(error as Error).message}`;
-  }
-}
-
 const TOOL_HANDLERS: Record<string, (input: any) => Promise<string> | string> = {
   bash: (input) => runBash(input.command),
   read_file: (input) => runRead(input.path, input.limit),
@@ -339,5 +255,4 @@ async function main() {
 
   rl.close();
 }
-
 main().catch(console.error);

@@ -8,7 +8,9 @@
     "build": "tsc",
     "dev1": "tsx ./src/s01_agent_loop.ts",
     "dev2": "tsx ./src/s02_tool_use.ts",
-    "dev3": "tsx ./src/s03_todo_write.ts"
+    "dev3": "tsx ./src/s03_todo_write.ts",
+    "dev4": "tsx ./src/s04_subagent.ts",
+    "dev5": "tsx ./src/s05_skill_loading.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",

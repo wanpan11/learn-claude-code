@@ -1,48 +1,30 @@
 #!/usr/bin/env node
-/**
- * s05_skill_loading.ts - Skills
- *
- * Two-layer skill injection that avoids bloating the system prompt:
- *
- *     Layer 1 (cheap): skill names in system prompt (~100 tokens/skill)
- *     Layer 2 (on demand): full skill body in tool_result
- *
- * Key insight: "Don't put everything in the system prompt. Load on demand."
- */
 
-import Anthropic from '@anthropic-ai/sdk';
-import { spawn } from 'child_process';
-import * as dotenv from 'dotenv';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as readline from 'readline';
+import Anthropic from "@anthropic-ai/sdk";
+import dotenv from "dotenv";
+import * as fs from "fs";
+import * as path from "path";
+import * as readline from "readline";
+import { runBash, runEdit, runRead, runWrite, WORKDIR } from "./common";
 
-dotenv.config({ override: true });
-
-if (process.env.ANTHROPIC_BASE_URL) {
-  delete process.env.ANTHROPIC_AUTH_TOKEN;
-}
-
-const WORKDIR = process.cwd();
+dotenv.config();
+const MODEL = process.env.MODEL_ID || "deepseek-reasoner";
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
   baseURL: process.env.ANTHROPIC_BASE_URL,
 });
 
-const MODEL = process.env.MODEL_ID || 'claude-sonnet-4-20250514';
-const SKILLS_DIR = path.join(WORKDIR, '.skills');
+const SKILLS_DIR = path.join(WORKDIR, "../skills");
 
-// -- SkillLoader: parse .skills/*.md files with YAML frontmatter --
+// -- SkillLoader: 解析带有 YAML 前置元数据的 .skills/*.md 文件 --
 interface SkillMeta {
   [key: string]: string;
 }
-
 interface Skill {
   meta: SkillMeta;
   body: string;
   path: string;
 }
-
 class SkillLoader {
   private skills: Map<string, Skill> = new Map();
 
@@ -55,10 +37,26 @@ class SkillLoader {
       return;
     }
 
-    const files = fs.readdirSync(this.skillsDir).filter(f => f.endsWith('.md'));
+    const files: string[] = [];
+    const entries = fs.readdirSync(this.skillsDir, { withFileTypes: true });
+    
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith(".md")) {
+        files.push(entry.name);
+      } else if (entry.isDirectory()) {
+        const subDir = path.join(this.skillsDir, entry.name);
+        const subEntries = fs.readdirSync(subDir, { withFileTypes: true });
+        for (const subEntry of subEntries) {
+          if (subEntry.isFile() && subEntry.name.endsWith(".md")) {
+            files.push(path.join(entry.name, subEntry.name));
+          }
+        }
+      }
+    }
+
     for (const file of files.sort()) {
-      const name = path.basename(file, '.md');
-      const text = fs.readFileSync(path.join(this.skillsDir, file), 'utf-8');
+      const name = file.replace(/\.md$/, '').replace(/\\/g, '/');
+      const text = fs.readFileSync(path.join(this.skillsDir, file), "utf-8");
       const [meta, body] = this.parseFrontmatter(text);
       this.skills.set(name, { meta, body, path: file });
     }
@@ -71,8 +69,8 @@ class SkillLoader {
     }
 
     const meta: SkillMeta = {};
-    for (const line of match[1].trim().split('\n')) {
-      const colonPos = line.indexOf(':');
+    for (const line of match[1].trim().split("\n")) {
+      const colonPos = line.indexOf(":");
       if (colonPos > 0) {
         const key = line.slice(0, colonPos).trim();
         const val = line.slice(colonPos + 1).trim();
@@ -85,121 +83,40 @@ class SkillLoader {
 
   getDescriptions(): string {
     if (this.skills.size === 0) {
-      return '(no skills available)';
+      return "(无可用技能)";
     }
 
     const lines: string[] = [];
     for (const [name, skill] of this.skills) {
-      const desc = skill.meta.description || 'No description';
-      const tags = skill.meta.tags || '';
+      const desc = skill.meta.description || "无描述";
+      const tags = skill.meta.tags || "";
       let line = `  - ${name}: ${desc}`;
       if (tags) {
         line += ` [${tags}]`;
       }
       lines.push(line);
     }
-    return lines.join('\n');
+    return lines.join("\n");
   }
 
   getContent(name: string): string {
     const skill = this.skills.get(name);
     if (!skill) {
-      const available = Array.from(this.skills.keys()).join(', ');
-      return `Error: Unknown skill '${name}'. Available: ${available}`;
+      const available = Array.from(this.skills.keys()).join(", ");
+      return `错误: 未知技能 '${name}'。可用技能: ${available}`;
     }
     return `<skill name="${name}">\n${skill.body}\n</skill>`;
   }
 }
-
 const SKILL_LOADER = new SkillLoader(SKILLS_DIR);
-const SYSTEM = `You are a coding agent at ${WORKDIR}.
-Use load_skill to access specialized knowledge before tackling unfamiliar topics.
 
-Skills available:
+const SYSTEM = `你是位于 ${WORKDIR} 的编码代理。
+在处理不熟悉的主题之前，使用 load_skill 访问专业知识。
+
+可用技能:
 ${SKILL_LOADER.getDescriptions()}`;
 
-// -- Tool implementations --
-function safePath(p: string): string {
-  const resolved = path.resolve(WORKDIR, p);
-  if (!resolved.startsWith(WORKDIR)) {
-    throw new Error(`Path escapes workspace: ${p}`);
-  }
-  return resolved;
-}
-
-async function runBash(command: string): Promise<string> {
-  const dangerous = ['rm -rf /', 'sudo', 'shutdown', 'reboot', '> /dev/'];
-  if (dangerous.some(d => command.includes(d))) {
-    return 'Error: Dangerous command blocked';
-  }
-
-  return new Promise((resolve) => {
-    const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
-    const child = spawn(shell, [process.platform === 'win32' ? '-Command' : '-c', command], {
-      cwd: WORKDIR,
-      timeout: 120000,
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout?.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    child.stderr?.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    child.on('close', () => {
-      const output = (stdout + stderr).trim();
-      resolve(output ? output.slice(0, 50000) : '(no output)');
-    });
-
-    child.on('error', (err) => {
-      resolve(`Error: ${err.message}`);
-    });
-  });
-}
-
-function runRead(filePath: string, limit?: number): string {
-  try {
-    const content = fs.readFileSync(safePath(filePath), 'utf-8');
-    let lines = content.split('\n');
-    if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more)`];
-    }
-    return lines.join('\n').slice(0, 50000);
-  } catch (error) {
-    return `Error: ${(error as Error).message}`;
-  }
-}
-
-function runWrite(filePath: string, content: string): string {
-  try {
-    const fp = safePath(filePath);
-    fs.mkdirSync(path.dirname(fp), { recursive: true });
-    fs.writeFileSync(fp, content, 'utf-8');
-    return `Wrote ${content.length} bytes`;
-  } catch (error) {
-    return `Error: ${(error as Error).message}`;
-  }
-}
-
-function runEdit(filePath: string, oldText: string, newText: string): string {
-  try {
-    const fp = safePath(filePath);
-    const content = fs.readFileSync(fp, 'utf-8');
-    if (!content.includes(oldText)) {
-      return `Error: Text not found in ${filePath}`;
-    }
-    fs.writeFileSync(fp, content.replace(oldText, newText), 'utf-8');
-    return `Edited ${filePath}`;
-  } catch (error) {
-    return `Error: ${(error as Error).message}`;
-  }
-}
-
+// -- 工具实现 --
 const TOOL_HANDLERS: Record<string, (input: any) => Promise<string> | string> = {
   bash: (input) => runBash(input.command),
   read_file: (input) => runRead(input.path, input.limit),
@@ -210,60 +127,60 @@ const TOOL_HANDLERS: Record<string, (input: any) => Promise<string> | string> = 
 
 const TOOLS: Anthropic.Tool[] = [
   {
-    name: 'bash',
-    description: 'Run a shell command.',
+    name: "bash",
+    description: "运行 shell 命令。",
     input_schema: {
-      type: 'object',
-      properties: { command: { type: 'string' } },
-      required: ['command'],
+      type: "object",
+      properties: { command: { type: "string" } },
+      required: ["command"],
     },
   },
   {
-    name: 'read_file',
-    description: 'Read file contents.',
+    name: "read_file",
+    description: "读取文件内容。",
     input_schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        path: { type: 'string' },
-        limit: { type: 'integer' },
+        path: { type: "string" },
+        limit: { type: "integer" },
       },
-      required: ['path'],
+      required: ["path"],
     },
   },
   {
-    name: 'write_file',
-    description: 'Write content to file.',
+    name: "write_file",
+    description: "将内容写入文件。",
     input_schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        path: { type: 'string' },
-        content: { type: 'string' },
+        path: { type: "string" },
+        content: { type: "string" },
       },
-      required: ['path', 'content'],
+      required: ["path", "content"],
     },
   },
   {
-    name: 'edit_file',
-    description: 'Replace exact text in file.',
+    name: "edit_file",
+    description: "替换文件中的精确文本。",
     input_schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        path: { type: 'string' },
-        old_text: { type: 'string' },
-        new_text: { type: 'string' },
+        path: { type: "string" },
+        old_text: { type: "string" },
+        new_text: { type: "string" },
       },
-      required: ['path', 'old_text', 'new_text'],
+      required: ["path", "old_text", "new_text"],
     },
   },
   {
-    name: 'load_skill',
-    description: 'Load specialized knowledge by name.',
+    name: "load_skill",
+    description: "按名称加载专业知识。",
     input_schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        name: { type: 'string', description: 'Skill name to load' },
+        name: { type: "string", description: "要加载的技能名称" },
       },
-      required: ['name'],
+      required: ["name"],
     },
   },
 ];
@@ -278,31 +195,35 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {
       max_tokens: 8000,
     });
 
-    messages.push({ role: 'assistant', content: response.content });
+    messages.push({ role: "assistant", content: response.content });
 
-    if (response.stop_reason !== 'tool_use') {
+    if (response.stop_reason !== "tool_use") {
+      console.log(
+        "[ 回复 ] ===>",
+        response.content
+          ?.filter((b) => b.type === "text")
+          .map((b) => b.text)
+          .join("\n") || "(无文本响应)",
+      );
       return;
     }
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type === 'tool_use') {
+      if (block.type === "tool_use") {
+        console.log("[ 工具调用 ] ===>", `[${block.name}]`, block.input);
+
         const handler = TOOL_HANDLERS[block.name];
-        let output: string;
-        try {
-          output = String(handler ? await handler(block.input) : `Unknown tool: ${block.name}`);
-        } catch (error) {
-          output = `Error: ${(error as Error).message}`;
-        }
-        console.log(`> ${block.name}: ${output.slice(0, 200)}`);
+        let output = await handler(block.input);
+
         results.push({
-          type: 'tool_result',
+          type: "tool_result",
           tool_use_id: block.id,
           content: output,
         });
       }
     }
-    messages.push({ role: 'user', content: results });
+    messages.push({ role: "user", content: results });
   }
 }
 
@@ -319,24 +240,19 @@ async function main() {
 
   while (true) {
     try {
-      const query = await prompt('\x1b[36ms05 >> \x1b[0m');
-      if (!query || ['q', 'exit'].includes(query.trim().toLowerCase())) {
+      const query = await prompt("\x1b[36ms05 >> \x1b[0m");
+      if (!query || ["q", "exit"].includes(query.trim().toLowerCase())) {
         break;
       }
-      history.push({ role: 'user', content: query });
+
+      history.push({ role: "user", content: query });
       await agentLoop(history);
-      console.log();
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ERR_USE_AFTER_CLOSE') break;
-      console.error('Error:', error);
+      if ((error as NodeJS.ErrnoException).code === "ERR_USE_AFTER_CLOSE") break;
+      console.error("Error:", error);
     }
   }
 
   rl.close();
 }
-
-if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch(console.error);
-}
-
-export { agentLoop, SkillLoader };
+main().catch(console.error);

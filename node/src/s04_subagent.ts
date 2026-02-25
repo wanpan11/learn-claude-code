@@ -1,132 +1,21 @@
 #!/usr/bin/env node
-/**
- * s04_subagent.ts - Subagents
- *
- * Spawn a child agent with fresh messages=[]. The child works in its own
- * context, sharing the filesystem, then returns only a summary to the parent.
- *
- *     Parent agent                     Subagent
- *     +------------------+             +------------------+
- *     | messages=[...]   |             | messages=[]      |  <-- fresh
- *     |                  |  dispatch   |                  |
- *     | tool: task       | ---------->| while tool_use:  |
- *     |   prompt="..."   |            |   call tools     |
- *     |   description="" |            |   append results |
- *     |                  |  summary   |                  |
- *     |   result = "..." | <--------- | return last text |
- *     +------------------+             +------------------+
- *               |
- *     Parent context stays clean.
- *     Subagent context is discarded.
- *
- * Key insight: "Process isolation gives context isolation for free."
- */
 
-import Anthropic from '@anthropic-ai/sdk';
-import { spawn } from 'child_process';
-import * as dotenv from 'dotenv';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as readline from 'readline';
+import Anthropic from "@anthropic-ai/sdk";
+import dotenv from "dotenv";
+import * as readline from "readline";
+import { runBash, runEdit, runRead, runWrite, WORKDIR } from "./common";
 
-dotenv.config({ override: true });
-
-if (process.env.ANTHROPIC_BASE_URL) {
-  delete process.env.ANTHROPIC_AUTH_TOKEN;
-}
-
-const WORKDIR = process.cwd();
+dotenv.config();
+const MODEL = process.env.MODEL_ID || "deepseek-reasoner";
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
   baseURL: process.env.ANTHROPIC_BASE_URL,
 });
 
-const MODEL = process.env.MODEL_ID || 'claude-sonnet-4-20250514';
-const SYSTEM = `You are a coding agent at ${WORKDIR}. Use the task tool to delegate exploration or subtasks.`;
-const SUBAGENT_SYSTEM = `You are a coding subagent at ${WORKDIR}. Complete the given task, then summarize your findings.`;
+const SYSTEM = `你是位于 ${WORKDIR} 的编码代理。使用 task 工具来委托探索或子任务。`;
+const SUBAGENT_SYSTEM = `你是位于 ${WORKDIR} 的编码子代理。完成给定的任务，然后总结你的发现。`;
 
-// -- Tool implementations shared by parent and child --
-function safePath(p: string): string {
-  const resolved = path.resolve(WORKDIR, p);
-  if (!resolved.startsWith(WORKDIR)) {
-    throw new Error(`Path escapes workspace: ${p}`);
-  }
-  return resolved;
-}
-
-async function runBash(command: string): Promise<string> {
-  const dangerous = ['rm -rf /', 'sudo', 'shutdown', 'reboot', '> /dev/'];
-  if (dangerous.some(d => command.includes(d))) {
-    return 'Error: Dangerous command blocked';
-  }
-
-  return new Promise((resolve) => {
-    const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
-    const child = spawn(shell, [process.platform === 'win32' ? '-Command' : '-c', command], {
-      cwd: WORKDIR,
-      timeout: 120000,
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout?.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    child.stderr?.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    child.on('close', () => {
-      const output = (stdout + stderr).trim();
-      resolve(output ? output.slice(0, 50000) : '(no output)');
-    });
-
-    child.on('error', (err) => {
-      resolve(`Error: ${err.message}`);
-    });
-  });
-}
-
-function runRead(filePath: string, limit?: number): string {
-  try {
-    const content = fs.readFileSync(safePath(filePath), 'utf-8');
-    let lines = content.split('\n');
-    if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more)`];
-    }
-    return lines.join('\n').slice(0, 50000);
-  } catch (error) {
-    return `Error: ${(error as Error).message}`;
-  }
-}
-
-function runWrite(filePath: string, content: string): string {
-  try {
-    const fp = safePath(filePath);
-    fs.mkdirSync(path.dirname(fp), { recursive: true });
-    fs.writeFileSync(fp, content, 'utf-8');
-    return `Wrote ${content.length} bytes`;
-  } catch (error) {
-    return `Error: ${(error as Error).message}`;
-  }
-}
-
-function runEdit(filePath: string, oldText: string, newText: string): string {
-  try {
-    const fp = safePath(filePath);
-    const content = fs.readFileSync(fp, 'utf-8');
-    if (!content.includes(oldText)) {
-      return `Error: Text not found in ${filePath}`;
-    }
-    fs.writeFileSync(fp, content.replace(oldText, newText), 'utf-8');
-    return `Edited ${filePath}`;
-  } catch (error) {
-    return `Error: ${(error as Error).message}`;
-  }
-}
-
+// -- 父代理和子代理共享的工具实现 --
 const TOOL_HANDLERS: Record<string, (input: any) => Promise<string> | string> = {
   bash: (input) => runBash(input.command),
   read_file: (input) => runRead(input.path, input.limit),
@@ -134,59 +23,59 @@ const TOOL_HANDLERS: Record<string, (input: any) => Promise<string> | string> = 
   edit_file: (input) => runEdit(input.path, input.old_text, input.new_text),
 };
 
-// Child gets all base tools except task (no recursive spawning)
+// 子代理获取除 task 之外的所有基础工具（不允许递归生成）
 const CHILD_TOOLS: Anthropic.Tool[] = [
   {
-    name: 'bash',
-    description: 'Run a shell command.',
+    name: "bash",
+    description: "Run a shell command.",
     input_schema: {
-      type: 'object',
-      properties: { command: { type: 'string' } },
-      required: ['command'],
+      type: "object",
+      properties: { command: { type: "string" } },
+      required: ["command"],
     },
   },
   {
-    name: 'read_file',
-    description: 'Read file contents.',
+    name: "read_file",
+    description: "Read file contents.",
     input_schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        path: { type: 'string' },
-        limit: { type: 'integer' },
+        path: { type: "string" },
+        limit: { type: "integer" },
       },
-      required: ['path'],
+      required: ["path"],
     },
   },
   {
-    name: 'write_file',
-    description: 'Write content to file.',
+    name: "write_file",
+    description: "Write content to file.",
     input_schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        path: { type: 'string' },
-        content: { type: 'string' },
+        path: { type: "string" },
+        content: { type: "string" },
       },
-      required: ['path', 'content'],
+      required: ["path", "content"],
     },
   },
   {
-    name: 'edit_file',
-    description: 'Replace exact text in file.',
+    name: "edit_file",
+    description: "Replace exact text in file.",
     input_schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        path: { type: 'string' },
-        old_text: { type: 'string' },
-        new_text: { type: 'string' },
+        path: { type: "string" },
+        old_text: { type: "string" },
+        new_text: { type: "string" },
       },
-      required: ['path', 'old_text', 'new_text'],
+      required: ["path", "old_text", "new_text"],
     },
   },
 ];
 
-// -- Subagent: fresh context, filtered tools, summary-only return --
+// -- 子代理：全新上下文，过滤的工具，仅返回摘要 --
 async function runSubagent(prompt: string): Promise<string> {
-  const subMessages: Anthropic.MessageParam[] = [{ role: 'user', content: prompt }];
+  const subMessages: Anthropic.MessageParam[] = [{ role: "user", content: prompt }];
 
   for (let i = 0; i < 30; i++) {
     const response = await client.messages.create({
@@ -197,50 +86,52 @@ async function runSubagent(prompt: string): Promise<string> {
       max_tokens: 8000,
     });
 
-    subMessages.push({ role: 'assistant', content: response.content });
+    subMessages.push({ role: "assistant", content: response.content });
 
-    if (response.stop_reason !== 'tool_use') {
-      // Only the final text returns to the parent -- child context is discarded
-      return response.content
-        .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-        .map(b => b.text)
-        .join('') || '(no summary)';
+    if (response.stop_reason !== "tool_use") {
+      // 只有最终文本返回给父代理 -- 子代理的上下文被丢弃
+      return (
+        response.content
+          .filter((b): b is Anthropic.TextBlock => b.type === "text")
+          .map((b) => b.text)
+          .join("") || "(no summary)"
+      );
     }
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type === 'tool_use') {
+      if (block.type === "tool_use") {
         const handler = TOOL_HANDLERS[block.name];
         const output = String(handler ? await handler(block.input) : `Unknown tool: ${block.name}`);
         results.push({
-          type: 'tool_result',
+          type: "tool_result",
           tool_use_id: block.id,
           content: output.slice(0, 50000),
         });
       }
     }
-    subMessages.push({ role: 'user', content: results });
+    subMessages.push({ role: "user", content: results });
   }
 
-  return '(subagent loop limit reached)';
+  return "(subagent loop limit reached)";
 }
 
-// -- Parent tools: base tools + task dispatcher --
+// -- 父代理工具：基础工具 + 任务分发器 --
 const PARENT_TOOLS: Anthropic.Tool[] = [
   ...CHILD_TOOLS,
   {
-    name: 'task',
-    description: 'Spawn a subagent with fresh context. It shares the filesystem but not conversation history.',
+    name: "task",
+    description: "Spawn a subagent with fresh context. It shares the filesystem but not conversation history.",
     input_schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        prompt: { type: 'string' },
+        prompt: { type: "string" },
         description: {
-          type: 'string',
-          description: 'Short description of the task',
+          type: "string",
+          description: "Short description of the task",
         },
       },
-      required: ['prompt'],
+      required: ["prompt"],
     },
   },
 ];
@@ -255,35 +146,36 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {
       max_tokens: 8000,
     });
 
-    messages.push({ role: 'assistant', content: response.content });
+    messages.push({ role: "assistant", content: response.content });
 
-    if (response.stop_reason !== 'tool_use') {
+    if (response.stop_reason !== "tool_use") {
       return;
     }
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
-      if (block.type === 'tool_use') {
+      if (block.type === "tool_use") {
         let output: string;
 
-        if (block.name === 'task') {
-          const desc = block.input.description || 'subtask';
-          console.log(`> task (${desc}): ${block.input.prompt.slice(0, 80)}`);
-          output = await runSubagent(block.input.prompt);
+        if (block.name === "task") {
+          const input = block.input as { prompt: string; description?: string };
+          const desc = input.description || "subtask";
+          console.log(`> 子任务 (${desc}): ${input.prompt.slice(0, 120)}...`);
+          output = await runSubagent(input.prompt);
         } else {
           const handler = TOOL_HANDLERS[block.name];
           output = String(handler ? await handler(block.input) : `Unknown tool: ${block.name}`);
         }
 
-        console.log(`  ${output.slice(0, 200)}`);
+        console.log("[ 工具/子任务输出 ] ===>", `  ${output.slice(0, 200)}`);
         results.push({
-          type: 'tool_result',
+          type: "tool_result",
           tool_use_id: block.id,
           content: output,
         });
       }
     }
-    messages.push({ role: 'user', content: results });
+    messages.push({ role: "user", content: results });
   }
 }
 
@@ -300,24 +192,19 @@ async function main() {
 
   while (true) {
     try {
-      const query = await prompt('\x1b[36ms04 >> \x1b[0m');
-      if (!query || ['q', 'exit'].includes(query.trim().toLowerCase())) {
+      const query = await prompt("\x1b[36ms04 >> \x1b[0m");
+      if (!query || ["q", "exit"].includes(query.trim().toLowerCase())) {
         break;
       }
-      history.push({ role: 'user', content: query });
+
+      history.push({ role: "user", content: query });
       await agentLoop(history);
-      console.log();
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ERR_USE_AFTER_CLOSE') break;
-      console.error('Error:', error);
+      if ((error as NodeJS.ErrnoException).code === "ERR_USE_AFTER_CLOSE") break;
+      console.error("Error:", error);
     }
   }
 
   rl.close();
 }
-
-if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch(console.error);
-}
-
-export { agentLoop, runSubagent };
+main().catch(console.error);
