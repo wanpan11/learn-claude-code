@@ -1,0 +1,260 @@
+#!/usr/bin/env node
+
+import OpenAI from "openai";
+import { spawn } from "child_process";
+import dotenv from "dotenv";
+import * as fs from "fs";
+import * as path from "path";
+import * as readline from "readline";
+
+dotenv.config();
+const MODEL = process.env.MODEL_ID || "deepseek-reasoner";
+const client = new OpenAI({
+  apiKey: process.env.DEEPSEEK_API_KEY,
+  baseURL: process.env.DEEPSEEK_BASE_URL,
+});
+
+const WORKDIR = process.cwd();
+const SYSTEM = `你是位于 ${WORKDIR} 的编码代理。使用工具来解决任务。行动，不要解释。`;
+
+function safePath(p: string): string {
+  const resolved = path.resolve(WORKDIR, p);
+  if (!resolved.startsWith(WORKDIR)) {
+    throw new Error(`Path escapes workspace: ${p}`);
+  }
+  return resolved;
+}
+
+function runBash(command: string): Promise<string> {
+  const dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
+  if (dangerous.some((d) => command.includes(d))) {
+    return Promise.resolve("Error: Dangerous command blocked");
+  }
+
+  return new Promise((resolve) => {
+    const shell = process.platform === "win32" ? "powershell.exe" : "bash";
+    const shellArgs = process.platform === "win32" ? ["-Command", command] : ["-c", command];
+    const child = spawn(shell, shellArgs, { timeout: 120000 });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout?.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr?.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    child.on("close", (code) => {
+      const output = (stdout + stderr).trim();
+      resolve(output ? output.slice(0, 50000) : "(no output)");
+    });
+
+    child.on("error", (err) => {
+      resolve(`Error: ${err.message}`);
+    });
+  });
+}
+
+function runRead(filePath: string, limit?: number): string {
+  try {
+    const content = fs.readFileSync(safePath(filePath), "utf-8");
+    let lines = content.split("\n");
+    if (limit && limit < lines.length) {
+      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
+    }
+    return lines.join("\n").slice(0, 50000);
+  } catch (error) {
+    return `Error: ${(error as Error).message}`;
+  }
+}
+
+function runWrite(filePath: string, content: string): string {
+  try {
+    const fp = safePath(filePath);
+    fs.mkdirSync(path.dirname(fp), { recursive: true });
+    fs.writeFileSync(fp, content, "utf-8");
+    return `Wrote ${content.length} bytes to ${filePath}`;
+  } catch (error) {
+    return `Error: ${(error as Error).message}`;
+  }
+}
+
+function runEdit(filePath: string, oldText: string, newText: string): string {
+  try {
+    const fp = safePath(filePath);
+    const content = fs.readFileSync(fp, "utf-8");
+    if (!content.includes(oldText)) {
+      return `Error: Text not found in ${filePath}`;
+    }
+    fs.writeFileSync(fp, content.replace(oldText, newText), "utf-8");
+    return `Edited ${filePath}`;
+  } catch (error) {
+    return `Error: ${(error as Error).message}`;
+  }
+}
+
+// -- 工具调度映射表: {工具名: 处理函数} --
+const TOOL_HANDLERS: Record<string, (input: any) => Promise<string> | string> = {
+  bash: (input) => runBash(input.command),
+  read_file: (input) => runRead(input.path, input.limit),
+  write_file: (input) => runWrite(input.path, input.content),
+  edit_file: (input) => runEdit(input.path, input.old_text, input.new_text),
+};
+
+const TOOLS: OpenAI.ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "bash",
+      description: "Run a shell command.",
+      parameters: {
+        type: "object",
+        properties: { command: { type: "string" } },
+        required: ["command"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_file",
+      description: "Read a file from the workspace.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Path relative to workspace root" },
+          limit: { type: "number", description: "Max lines to read (optional)" },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_file",
+      description: "Write content to a file.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["path", "content"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "edit_file",
+      description: "Replace old_text with new_text in a file.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          old_text: { type: "string" },
+          new_text: { type: "string" },
+        },
+        required: ["path", "old_text", "new_text"],
+      },
+    },
+  },
+];
+
+async function agentLoop(messages: OpenAI.ChatCompletionMessageParam[]): Promise<void> {
+  while (true) {
+    const response = await client.chat.completions.create({
+      model: MODEL,
+      messages: [{ role: "system", content: SYSTEM }, ...messages],
+      tools: TOOLS,
+      max_tokens: 8000,
+    });
+
+    const assistantMessage = response.choices[0].message;
+    
+    // 显示回复内容或工具调用信息
+    if (assistantMessage.content) {
+      console.log("[ 回复 ] ===>", assistantMessage.content);
+    }
+    if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
+      console.log(`[ 工具调用 ] ===> ${assistantMessage.tool_calls.length} 个工具`);
+      assistantMessage.tool_calls.forEach(tc => {
+        if (tc.type === "function") {
+          const args = JSON.parse(tc.function.arguments);
+          console.log(`  - ${tc.function.name}(${JSON.stringify(args).slice(0, 100)})`);
+        }
+      });
+    }
+
+    // 添加助手回复
+    messages.push(assistantMessage);
+
+    // 如果模型没有调用工具，则完成
+    if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+      return;
+    }
+
+    const toolMessages: OpenAI.ChatCompletionToolMessageParam[] = [];
+    for (const toolCall of assistantMessage.tool_calls) {
+      if (toolCall.type !== "function") continue;
+
+      const handler = TOOL_HANDLERS[toolCall.function.name];
+      if (!handler) {
+        toolMessages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: `Error: Unknown tool '${toolCall.function.name}'`,
+        });
+        continue;
+      }
+
+      const args = JSON.parse(toolCall.function.arguments);
+      console.log("[ args.command ] ===>", toolCall.function.name, args.command);
+
+      const output = await handler(args);
+      // console.log(output.slice(0, 200));
+
+      toolMessages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: output,
+      });
+    }
+    messages.push(...toolMessages);
+  }
+}
+
+async function main() {
+  const history: OpenAI.ChatCompletionMessageParam[] = [];
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  const prompt = (query: string): Promise<string> => {
+    return new Promise((resolve) => rl.question(query, resolve));
+  };
+
+  while (true) {
+    try {
+      const query = await prompt("\x1b[36ms02 >> \x1b[0m");
+      if (!query || ["q", "exit"].includes(query.trim().toLowerCase())) {
+        break;
+      }
+
+      history.push({ role: "user", content: query });
+      await agentLoop(history);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ERR_USE_AFTER_CLOSE") break;
+      console.error("Error:", error);
+    }
+  }
+
+  rl.close();
+}
+
+main().catch(console.error);

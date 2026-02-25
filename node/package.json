@@ -1,0 +1,22 @@
+{
+  "name": "learn-claude-agents-node",
+  "version": "1.0.0",
+  "description": "Node.js implementation of Claude AI coding agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev0": "tsx ./src/s01_agent_loop.ts",
+    "dev1": "tsx ./src/s02_tool_use.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "dotenv": "^16.4.5",
+    "openai": "^6.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.3.3"
+  }
+}

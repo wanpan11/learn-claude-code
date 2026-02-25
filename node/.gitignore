@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+*.log
+.tasks/
+.team/
+.skills/
+.transcripts/
+.worktrees/
