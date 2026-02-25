@@ -6,8 +6,9 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "dev0": "tsx ./src/s01_agent_loop.ts",
-    "dev1": "tsx ./src/s02_tool_use.ts"
+    "dev1": "tsx ./src/s01_agent_loop.ts",
+    "dev2": "tsx ./src/s02_tool_use.ts",
+    "dev3": "tsx ./src/s03_todo_write.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",

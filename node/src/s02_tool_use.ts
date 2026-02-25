@@ -175,19 +175,13 @@ async function agentLoop(messages: OpenAI.ChatCompletionMessageParam[]): Promise
     });
 
     const assistantMessage = response.choices[0].message;
-    
+
     // 显示回复内容或工具调用信息
     if (assistantMessage.content) {
       console.log("[ 回复 ] ===>", assistantMessage.content);
     }
-    if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
+    if (assistantMessage.tool_calls) {
       console.log(`[ 工具调用 ] ===> ${assistantMessage.tool_calls.length} 个工具`);
-      assistantMessage.tool_calls.forEach(tc => {
-        if (tc.type === "function") {
-          const args = JSON.parse(tc.function.arguments);
-          console.log(`  - ${tc.function.name}(${JSON.stringify(args).slice(0, 100)})`);
-        }
-      });
     }
 
     // 添加助手回复
@@ -212,12 +206,10 @@ async function agentLoop(messages: OpenAI.ChatCompletionMessageParam[]): Promise
         continue;
       }
 
+      console.log("[ 工具参数 ] ===>", `[${toolCall.function.name}]`, toolCall.function.arguments);
       const args = JSON.parse(toolCall.function.arguments);
-      console.log("[ args.command ] ===>", toolCall.function.name, args.command);
 
       const output = await handler(args);
-      // console.log(output.slice(0, 200));
-
       toolMessages.push({
         role: "tool",
         tool_call_id: toolCall.id,
