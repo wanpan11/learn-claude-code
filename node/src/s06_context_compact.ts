@@ -1,55 +1,40 @@
 #!/usr/bin/env node
-/**
- * s06_context_compact.ts - Compact
- *
- * Three-layer compression pipeline so the agent can work forever:
- *   Layer 1: micro_compact - replace old tool results with placeholders
- *   Layer 2: auto_compact - save transcript, summarize when tokens > 50000
- *   Layer 3: compact tool - manual compression on demand
- *
- * Key insight: "The agent can forget strategically and keep working forever."
- */
 
-import Anthropic from '@anthropic-ai/sdk';
-import { spawn } from 'child_process';
-import * as dotenv from 'dotenv';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as readline from 'readline';
+import Anthropic from "@anthropic-ai/sdk";
+import * as dotenv from "dotenv";
+import * as fs from "fs";
+import * as path from "path";
+import * as readline from "readline";
+import { runBash, runEdit, runRead, runWrite, WORKDIR } from "./common";
 
-dotenv.config({ override: true });
-
-if (process.env.ANTHROPIC_BASE_URL) {
-  delete process.env.ANTHROPIC_AUTH_TOKEN;
-}
-
-const WORKDIR = process.cwd();
+dotenv.config();
+const MODEL = process.env.MODEL_ID || "deepseek-reasoner";
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
   baseURL: process.env.ANTHROPIC_BASE_URL,
 });
 
-const MODEL = process.env.MODEL_ID || 'claude-sonnet-4-20250514';
-const SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks.`;
+const SYSTEM = `你是一个位于 ${WORKDIR} 的编码代理。使用工具来解决任务。`;
 
 const THRESHOLD = 50000;
-const TRANSCRIPT_DIR = path.join(WORKDIR, '.transcripts');
+const TRANSCRIPT_DIR = path.join(WORKDIR, ".transcripts");
 const KEEP_RECENT = 3;
 
 function estimateTokens(messages: Anthropic.MessageParam[]): number {
   return Math.floor(JSON.stringify(messages).length / 4);
 }
 
-// -- Layer 1: micro_compact - replace old tool results with placeholders --
+// -- 第1层：micro_compact - 用占位符替换旧的工具结果 --
+// 对 tool_result 工具输出结果 进行微压缩：如果内容过长且不是最近的几个结果，就替换为简短占位符，保留工具名称以提供上下文线索。
 function microCompact(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
   const toolResults: Array<{ msgIdx: number; partIdx: number; result: any }> = [];
-  
+
   for (let msgIdx = 0; msgIdx < messages.length; msgIdx++) {
     const msg = messages[msgIdx];
-    if (msg.role === 'user' && Array.isArray(msg.content)) {
+    if (msg.role === "user" && Array.isArray(msg.content)) {
       for (let partIdx = 0; partIdx < msg.content.length; partIdx++) {
         const part = msg.content[partIdx];
-        if (typeof part === 'object' && part.type === 'tool_result') {
+        if (typeof part === "object" && part.type === "tool_result") {
           toolResults.push({ msgIdx, partIdx, result: part });
         }
       }
@@ -60,24 +45,24 @@ function microCompact(messages: Anthropic.MessageParam[]): Anthropic.MessagePara
     return messages;
   }
 
-  // Build tool name map from assistant messages
+  // 从助手消息中构建工具名称映射
   const toolNameMap = new Map<string, string>();
   for (const msg of messages) {
-    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+    if (msg.role === "assistant" && Array.isArray(msg.content)) {
       for (const block of msg.content) {
-        if (typeof block === 'object' && 'type' in block && block.type === 'tool_use') {
+        if (typeof block === "object" && "type" in block && block.type === "tool_use") {
           toolNameMap.set(block.id, block.name);
         }
       }
     }
   }
 
-  // Clear old results (keep last KEEP_RECENT)
+  // 清除旧结果（保留最后 KEEP_RECENT 个）
   const toClear = toolResults.slice(0, toolResults.length - KEEP_RECENT);
   for (const { result } of toClear) {
-    if (typeof result.content === 'string' && result.content.length > 100) {
-      const toolId = result.tool_use_id || '';
-      const toolName = toolNameMap.get(toolId) || 'unknown';
+    if (typeof result.content === "string" && result.content.length > 100) {
+      const toolId = result.tool_use_id || "";
+      const toolName = toolNameMap.get(toolId) || "unknown";
       result.content = `[Previous: used ${toolName}]`;
     }
   }
@@ -85,120 +70,42 @@ function microCompact(messages: Anthropic.MessageParam[]): Anthropic.MessagePara
   return messages;
 }
 
-// -- Layer 2: auto_compact - save transcript, summarize, replace messages --
+// -- 第2层：auto_compact - 保存记录、总结并替换消息 --
 async function autoCompact(messages: Anthropic.MessageParam[]): Promise<Anthropic.MessageParam[]> {
   fs.mkdirSync(TRANSCRIPT_DIR, { recursive: true });
   const transcriptPath = path.join(TRANSCRIPT_DIR, `transcript_${Date.now()}.jsonl`);
-  
-  const lines = messages.map(msg => JSON.stringify(msg)).join('\n');
-  fs.writeFileSync(transcriptPath, lines, 'utf-8');
+
+  const lines = messages.map((msg) => JSON.stringify(msg)).join("\n");
+  fs.writeFileSync(transcriptPath, lines, "utf-8");
   console.log(`[transcript saved: ${transcriptPath}]`);
 
-  // Ask LLM to summarize
+  // 请求 LLM 进行总结
   const conversationText = JSON.stringify(messages).slice(0, 80000);
   const response = await client.messages.create({
     model: MODEL,
-    messages: [{
-      role: 'user',
-      content: 'Summarize this conversation for continuity. Include: ' +
-        '1) What was accomplished, 2) Current state, 3) Key decisions made. ' +
-        'Be concise but preserve critical details.\n\n' + conversationText
-    }],
+    messages: [
+      {
+        role: "user",
+        content:
+          "Summarize this conversation for continuity. Include: " +
+          "1) What was accomplished, 2) Current state, 3) Key decisions made. " +
+          "Be concise but preserve critical details.\n\n" +
+          conversationText,
+      },
+    ],
     max_tokens: 2000,
   });
 
   const summary = response.content
-    .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-    .map(b => b.text)
-    .join('');
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("");
 
-  // Replace all messages with compressed summary
+  // 用压缩后的摘要替换所有消息
   return [
-    { role: 'user', content: `[Conversation compressed. Transcript: ${transcriptPath}]\n\n${summary}` },
-    { role: 'assistant', content: 'Understood. I have the context from the summary. Continuing.' },
+    { role: "user", content: `[对话已压缩。记录位置：${transcriptPath}]\n\n${summary}` },
+    { role: "assistant", content: "明白了。我已从摘要中获得上下文。继续执行。" },
   ];
-}
-
-// -- Tool implementations --
-function safePath(p: string): string {
-  const resolved = path.resolve(WORKDIR, p);
-  if (!resolved.startsWith(WORKDIR)) {
-    throw new Error(`Path escapes workspace: ${p}`);
-  }
-  return resolved;
-}
-
-async function runBash(command: string): Promise<string> {
-  const dangerous = ['rm -rf /', 'sudo', 'shutdown', 'reboot', '> /dev/'];
-  if (dangerous.some(d => command.includes(d))) {
-    return 'Error: Dangerous command blocked';
-  }
-
-  return new Promise((resolve) => {
-    const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
-    const child = spawn(shell, [process.platform === 'win32' ? '-Command' : '-c', command], {
-      cwd: WORKDIR,
-      timeout: 120000,
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout?.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    child.stderr?.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    child.on('close', () => {
-      const output = (stdout + stderr).trim();
-      resolve(output ? output.slice(0, 50000) : '(no output)');
-    });
-
-    child.on('error', (err) => {
-      resolve(`Error: ${err.message}`);
-    });
-  });
-}
-
-function runRead(filePath: string, limit?: number): string {
-  try {
-    const content = fs.readFileSync(safePath(filePath), 'utf-8');
-    let lines = content.split('\n');
-    if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more)`];
-    }
-    return lines.join('\n').slice(0, 50000);
-  } catch (error) {
-    return `Error: ${(error as Error).message}`;
-  }
-}
-
-function runWrite(filePath: string, content: string): string {
-  try {
-    const fp = safePath(filePath);
-    fs.mkdirSync(path.dirname(fp), { recursive: true });
-    fs.writeFileSync(fp, content, 'utf-8');
-    return `Wrote ${content.length} bytes`;
-  } catch (error) {
-    return `Error: ${(error as Error).message}`;
-  }
-}
-
-function runEdit(filePath: string, oldText: string, newText: string): string {
-  try {
-    const fp = safePath(filePath);
-    const content = fs.readFileSync(fp, 'utf-8');
-    if (!content.includes(oldText)) {
-      return `Error: Text not found in ${filePath}`;
-    }
-    fs.writeFileSync(fp, content.replace(oldText, newText), 'utf-8');
-    return `Edited ${filePath}`;
-  } catch (error) {
-    return `Error: ${(error as Error).message}`;
-  }
 }
 
 const TOOL_HANDLERS: Record<string, (input: any) => Promise<string> | string> = {
@@ -206,63 +113,62 @@ const TOOL_HANDLERS: Record<string, (input: any) => Promise<string> | string> = 
   read_file: (input) => runRead(input.path, input.limit),
   write_file: (input) => runWrite(input.path, input.content),
   edit_file: (input) => runEdit(input.path, input.old_text, input.new_text),
-  compact: () => 'Manual compression requested.',
+  compact: () => "Manual compression requested.",
 };
-
 const TOOLS: Anthropic.Tool[] = [
   {
-    name: 'bash',
-    description: 'Run a shell command.',
+    name: "bash",
+    description: "Run a shell command.",
     input_schema: {
-      type: 'object',
-      properties: { command: { type: 'string' } },
-      required: ['command'],
+      type: "object",
+      properties: { command: { type: "string" } },
+      required: ["command"],
     },
   },
   {
-    name: 'read_file',
-    description: 'Read file contents.',
+    name: "read_file",
+    description: "Read file contents.",
     input_schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        path: { type: 'string' },
-        limit: { type: 'integer' },
+        path: { type: "string" },
+        limit: { type: "integer" },
       },
-      required: ['path'],
+      required: ["path"],
     },
   },
   {
-    name: 'write_file',
-    description: 'Write content to file.',
+    name: "write_file",
+    description: "Write content to file.",
     input_schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        path: { type: 'string' },
-        content: { type: 'string' },
+        path: { type: "string" },
+        content: { type: "string" },
       },
-      required: ['path', 'content'],
+      required: ["path", "content"],
     },
   },
   {
-    name: 'edit_file',
-    description: 'Replace exact text in file.',
+    name: "edit_file",
+    description: "Replace exact text in file.",
     input_schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        path: { type: 'string' },
-        old_text: { type: 'string' },
-        new_text: { type: 'string' },
+        path: { type: "string" },
+        old_text: { type: "string" },
+        new_text: { type: "string" },
       },
-      required: ['path', 'old_text', 'new_text'],
+      required: ["path", "old_text", "new_text"],
     },
   },
   {
-    name: 'compact',
-    description: 'Trigger manual conversation compression.',
+    name: "compact",
+    description: "Trigger manual conversation compression.",
     input_schema: {
-      type: 'object',
+      type: "object",
       properties: {
-        focus: { type: 'string', description: 'What to preserve in the summary' },
+        focus: { type: "string", description: "What to preserve in the summary" },
       },
     },
   },
@@ -270,12 +176,12 @@ const TOOLS: Anthropic.Tool[] = [
 
 async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {
   while (true) {
-    // Layer 1: micro_compact before each LLM call
+    // 第1层：每次调用 LLM 前执行 micro_compact
     microCompact(messages);
 
-    // Layer 2: auto_compact if token estimate exceeds threshold
+    // 第2层：如果估算的 token 数超过阈值，执行 auto_compact
     if (estimateTokens(messages) > THRESHOLD) {
-      console.log('[auto_compact triggered]');
+      console.log("[auto_compact triggered]");
       const compacted = await autoCompact(messages);
       messages.splice(0, messages.length, ...compacted);
     }
@@ -288,9 +194,16 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {
       max_tokens: 8000,
     });
 
-    messages.push({ role: 'assistant', content: response.content });
+    messages.push({ role: "assistant", content: response.content });
 
-    if (response.stop_reason !== 'tool_use') {
+    if (response.stop_reason !== "tool_use") {
+      console.log(
+        "[ 回复 ] ===>",
+        response.content
+          ?.filter((b) => b.type === "text")
+          .map((b) => b.text)
+          .join("\n") || "(无文本响应)",
+      );
       return;
     }
 
@@ -298,35 +211,31 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {
     let manualCompact = false;
 
     for (const block of response.content) {
-      if (block.type === 'tool_use') {
+      if (block.type === "tool_use") {
+        console.log("[ 工具调用 ] ===>", `[${block.name}]`, block.input);
         let output: string;
-        
-        if (block.name === 'compact') {
+
+        if (block.name === "compact") {
           manualCompact = true;
-          output = 'Compressing...';
+          output = "Compressing...";
         } else {
           const handler = TOOL_HANDLERS[block.name];
-          try {
-            output = String(handler ? await handler(block.input) : `Unknown tool: ${block.name}`);
-          } catch (error) {
-            output = `Error: ${(error as Error).message}`;
-          }
+          output = await handler(block.input);
         }
-        
-        console.log(`> ${block.name}: ${output.slice(0, 200)}`);
+
         results.push({
-          type: 'tool_result',
+          type: "tool_result",
           tool_use_id: block.id,
           content: output,
         });
       }
     }
-    
-    messages.push({ role: 'user', content: results });
 
-    // Layer 3: manual compact triggered by the compact tool
+    messages.push({ role: "user", content: results });
+
+    // 第3层：由 compact 工具触发的手动压缩
     if (manualCompact) {
-      console.log('[manual compact]');
+      console.log("[manual compact]");
       const compacted = await autoCompact(messages);
       messages.splice(0, messages.length, ...compacted);
     }
@@ -346,24 +255,19 @@ async function main() {
 
   while (true) {
     try {
-      const query = await prompt('\x1b[36ms06 >> \x1b[0m');
-      if (!query || ['q', 'exit'].includes(query.trim().toLowerCase())) {
+      const query = await prompt("\x1b[36ms06 >> \x1b[0m");
+      if (!query || ["q", "exit"].includes(query.trim().toLowerCase())) {
         break;
       }
-      history.push({ role: 'user', content: query });
+
+      history.push({ role: "user", content: query });
       await agentLoop(history);
-      console.log();
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ERR_USE_AFTER_CLOSE') break;
-      console.error('Error:', error);
+      if ((error as NodeJS.ErrnoException).code === "ERR_USE_AFTER_CLOSE") break;
+      console.error("Error:", error);
     }
   }
 
   rl.close();
 }
-
-if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch(console.error);
-}
-
-export { agentLoop, microCompact, autoCompact };
+main().catch(console.error);

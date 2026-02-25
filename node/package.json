@@ -10,7 +10,8 @@
     "dev2": "tsx ./src/s02_tool_use.ts",
     "dev3": "tsx ./src/s03_todo_write.ts",
     "dev4": "tsx ./src/s04_subagent.ts",
-    "dev5": "tsx ./src/s05_skill_loading.ts"
+    "dev5": "tsx ./src/s05_skill_loading.ts",
+    "dev6": "tsx ./src/s06_context_compact.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",
