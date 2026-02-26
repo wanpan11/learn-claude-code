@@ -156,15 +156,25 @@ class TeammateManager {
     const messages: Anthropic.MessageParam[] = [{ role: "user", content: prompt }];
     const tools = this._teammateTools();
     let shouldExit = false;
+    let hasNewInput = true; // 跟踪是否有新输入
 
     for (let i = 0; i < 50; i++) {
       const inbox = BUS.readInbox(name);
+      const hasInboxMessages = inbox.length > 0;
+
       for (const msg of inbox) {
         messages.push({ role: "user", content: JSON.stringify(msg) });
       }
 
       if (shouldExit) {
         break;
+      }
+
+      // 只有在有新输入时才调用 AI
+      if (!hasNewInput && !hasInboxMessages) {
+        // 等待新消息
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        continue;
       }
 
       const response = await client.messages.create({
@@ -184,8 +194,11 @@ class TeammateManager {
             .map((b) => b.text)
             .join("\n") || "(无文本响应)",
         );
-        return;
+        hasNewInput = false; // 标记需要等待新输入
+        continue;
       }
+
+      hasNewInput = false; // 完成工具调用后，等待新输入
 
       const results: Anthropic.ToolResultBlockParam[] = [];
       for (const block of response.content) {
