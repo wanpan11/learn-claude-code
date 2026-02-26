@@ -17,7 +17,7 @@
       "id": "scriptName",
       "type": "pickString",
       "description": "选择要运行的脚本",
-      "options": ["dev3", "dev6", "dev7", "dev8"],
+      "options": ["dev3", "dev6", "dev7", "dev8", "dev9", "dev10", "dev11", "dev12"],
       "default": "dev6"
     }
   ]
