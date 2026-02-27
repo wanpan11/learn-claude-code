@@ -128,5 +128,6 @@ export function runEdit(filePath: string, oldText: string, newText: string): str
 
 // ========================================= Agent 团队 ============================================ //
 export const TEAM_DIR = path.join(WORKDIR, ".team");
+export const TASKS_DIR = path.join(WORKDIR, ".tasks");
 export const INBOX_DIR = path.join(TEAM_DIR, "inbox");
 export const VALID_MSG_TYPES = new Set(["message", "broadcast", "shutdown_request", "shutdown_response", "plan_approval_response"]);
