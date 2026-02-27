@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { spawn } from "child_process";
+import { execSync, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import winston from "winston";
@@ -50,7 +50,7 @@ export const WORKDIR = process.cwd();
 export function runBash(command: string): Promise<string> {
   const dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
   if (dangerous.some((d) => command.includes(d))) {
-    return Promise.resolve("Error: Dangerous command blocked");
+    return Promise.resolve("错误：危险命令已被阻止");
   }
 
   return new Promise((resolve) => {
@@ -71,11 +71,11 @@ export function runBash(command: string): Promise<string> {
 
     child.on("close", (code) => {
       const output = (stdout + stderr).trim();
-      resolve(output ? output.slice(0, 50000) : "(no output)");
+      resolve(output ? output.slice(0, 50000) : "(无输出)");
     });
 
     child.on("error", (err) => {
-      resolve(`Error: ${err.message}`);
+      resolve(`错误：${err.message}`);
     });
   });
 }
@@ -83,7 +83,7 @@ export function runBash(command: string): Promise<string> {
 export function safePath(p: string): string {
   const resolved = path.resolve(WORKDIR, p);
   if (!resolved.startsWith(WORKDIR)) {
-    throw new Error(`Path escapes workspace: ${p}`);
+    throw new Error(`路径超出工作区：${p}`);
   }
   return resolved;
 }
@@ -93,11 +93,11 @@ export function runRead(filePath: string, limit?: number): string {
     const content = fs.readFileSync(safePath(filePath), "utf-8");
     let lines = content.split("\n");
     if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
+      lines = [...lines.slice(0, limit), `... (还有 ${lines.length - limit} 行)`];
     }
     return lines.join("\n").slice(0, 50000);
   } catch (error) {
-    return `Error: ${(error as Error).message}`;
+    return `错误：${(error as Error).message}`;
   }
 }
 
@@ -106,9 +106,9 @@ export function runWrite(filePath: string, content: string): string {
     const fp = safePath(filePath);
     fs.mkdirSync(path.dirname(fp), { recursive: true });
     fs.writeFileSync(fp, content, "utf-8");
-    return `Wrote ${content.length} bytes to ${filePath}`;
+    return `写入 ${content.length} 字节到 ${filePath}`;
   } catch (error) {
-    return `Error: ${(error as Error).message}`;
+    return `错误：${(error as Error).message}`;
   }
 }
 
@@ -117,12 +117,26 @@ export function runEdit(filePath: string, oldText: string, newText: string): str
     const fp = safePath(filePath);
     const content = fs.readFileSync(fp, "utf-8");
     if (!content.includes(oldText)) {
-      return `Error: Text not found in ${filePath}`;
+      return `错误：在 ${filePath} 中找不到指定文本`;
     }
     fs.writeFileSync(fp, content.replace(oldText, newText), "utf-8");
-    return `Edited ${filePath}`;
+    return `已编辑 ${filePath}`;
   } catch (error) {
-    return `Error: ${(error as Error).message}`;
+    return `错误：${(error as Error).message}`;
+  }
+}
+
+// -- 检测仓库根目录 --
+export function detectRepoRoot(cwd: string): string {
+  try {
+    const result = execSync("git rev-parse --show-toplevel", {
+      cwd: cwd,
+      encoding: "utf-8",
+      timeout: 10000,
+    }).trim();
+    return fs.existsSync(result) ? result : cwd;
+  } catch {
+    return cwd;
   }
 }
 

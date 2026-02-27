@@ -17,7 +17,7 @@
     "dev9": "tsx ./src/s09_agent_teams.ts",
     "dev10": "tsx ./src/s10_team_protocols.ts",
     "dev11": "tsx ./src/s11_autonomous_agents.ts",
-    "dev12": "tsx ./src/s12_some_other_script.ts"
+    "dev12": "tsx ./src/s12_worktree_task_isolation.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",
