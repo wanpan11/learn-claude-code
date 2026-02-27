@@ -1,12 +1,12 @@
-#!/usr/bin/env node
+#!/usr/bin/env node·
 
 import Anthropic from "@anthropic-ai/sdk";
-import * as dotenv from "dotenv";
-import * as fs from "fs";
-import * as path from "path";
-import * as readline from "readline";
+import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
+import readline from "readline";
 import { randomUUID } from "crypto";
-import { INBOX_DIR, runBash, runEdit, runRead, runWrite, TEAM_DIR, VALID_MSG_TYPES, WORKDIR } from "./common";
+import { getAiTextContent, INBOX_DIR, logger, runBash, runEdit, runRead, runWrite, TEAM_DIR, VALID_MSG_TYPES, WORKDIR } from "./common";
 
 dotenv.config();
 const MODEL = process.env.MODEL_ID || "deepseek-reasoner";
@@ -15,7 +15,7 @@ const client = new Anthropic({
   baseURL: process.env.ANTHROPIC_BASE_URL,
 });
 
-const SYSTEM = `你是 ${WORKDIR} 的团队负责人。使用关闭和计划审批协议管理队友。`;
+const SYSTEM = `你是 ${WORKDIR} 的团队负责人。使用关闭和计划审批协议管理队友, 任务分配后需等待队友完成，不要重复执行。`;
 
 // -- 请求跟踪器：通过 request_id 关联 --
 interface ShutdownRequest {
@@ -158,12 +158,15 @@ class TeammateManager {
     let shouldExit = false;
     let hasNewInput = true; // 跟踪是否有新输入
 
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 200; i++) {
       const inbox = BUS.readInbox(name);
-      const hasInboxMessages = inbox.length > 0;
 
-      for (const msg of inbox) {
-        messages.push({ role: "user", content: JSON.stringify(msg) });
+      if (inbox.length > 0) {
+        for (const msg of inbox) {
+          messages.push({ role: "user", content: JSON.stringify(msg) });
+        }
+        // 有新的收件箱消息，标记需要调用 AI
+        hasNewInput = true;
       }
 
       if (shouldExit) {
@@ -171,9 +174,8 @@ class TeammateManager {
       }
 
       // 只有在有新输入时才调用 AI
-      if (!hasNewInput && !hasInboxMessages) {
-        // 等待新消息
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+      if (!hasNewInput) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
         continue;
       }
 
@@ -187,23 +189,18 @@ class TeammateManager {
       messages.push({ role: "assistant", content: response.content });
 
       if (response.stop_reason !== "tool_use") {
-        console.log(
-          `[ ${name} 回复 ] ===>`,
-          response.content
-            ?.filter((b) => b.type === "text")
-            .map((b) => b.text)
-            .join("\n") || "(无文本响应)",
-        );
-        hasNewInput = false; // 标记需要等待新输入
+        const textContent = getAiTextContent(response);
+        logger.info(`[ ${name} 回复 ] ===>`, { content: textContent });
+        // 标记需要等待新输入
+        hasNewInput = false;
         continue;
       }
-
-      hasNewInput = false; // 完成工具调用后，等待新输入
 
       const results: Anthropic.ToolResultBlockParam[] = [];
       for (const block of response.content) {
         if (block.type === "tool_use") {
-          console.log(`[ ${name} 工具调用 ] ===>`, `[${block.name}]`, block.input);
+          logger.info(`[ ${name} 工具调用 ] ===>`, { tool: block.name, input: block.input });
+
           const output = await this._exec(name, block.name, block.input as Record<string, any>);
           results.push({ type: "tool_result", tool_use_id: block.id, content: output });
 
@@ -511,6 +508,8 @@ const TOOLS: Anthropic.Tool[] = [
 
 // -- 负责人的循环：处理输入、工具调用和收件箱 --
 async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {
+  let hasNewInput = true; // 首次调用时有用户输入
+
   while (true) {
     const inbox = BUS.readInbox("lead");
     if (inbox.length > 0) {
@@ -522,6 +521,14 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {
         role: "assistant",
         content: "已记录收件箱消息。",
       });
+      hasNewInput = true; // 有新的收件箱消息
+    }
+
+    // 只有在有新输入时才调用 AI
+    if (!hasNewInput) {
+      // 等待新消息
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      continue;
     }
 
     const response = await client.messages.create({
@@ -534,20 +541,18 @@ async function agentLoop(messages: Anthropic.MessageParam[]): Promise<void> {
     messages.push({ role: "assistant", content: response.content });
 
     if (response.stop_reason !== "tool_use") {
-      console.log(
-        "[ 主 回复 ] ===>",
-        response.content
-          ?.filter((b) => b.type === "text")
-          .map((b) => b.text)
-          .join("\n") || "(无文本响应)",
-      );
-      return;
+      const textContent = getAiTextContent(response);
+      logger.info("[ 主 回复 ] ===>", { content: textContent });
+      /// 标记需要等待新输入
+      hasNewInput = false;
+      continue;
     }
+
 
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of response.content) {
       if (block.type === "tool_use") {
-        console.log("[ 主 工具调用 ] ===>", `[${block.name}]`, block.input);
+        logger.info("[ 主 工具调用 ] ===>", { tool: block.name, input: block.input });
 
         const handler = TOOL_HANDLERS[block.name];
         let output = await handler(block.input);
@@ -577,12 +582,12 @@ async function main() {
       process.exit(0);
     }
     if (query === "/team") {
-      console.log(TEAM.listAll());
+      logger.info(TEAM.listAll());
       rl.prompt();
       return;
     }
     if (query === "/inbox") {
-      console.log(JSON.stringify(BUS.readInbox("lead"), null, 2));
+      logger.info(JSON.stringify(BUS.readInbox("lead"), null, 2));
       rl.prompt();
       return;
     }

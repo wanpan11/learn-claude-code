@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 import Anthropic from "@anthropic-ai/sdk";
-import * as dotenv from "dotenv";
-import * as fs from "fs";
-import * as path from "path";
-import * as readline from "readline";
+import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
+import readline from "readline";
 import { INBOX_DIR, runBash, runEdit, runRead, runWrite, TEAM_DIR, VALID_MSG_TYPES, WORKDIR } from "./common";
 
 dotenv.config();

@@ -1,9 +1,52 @@
+import Anthropic from "@anthropic-ai/sdk";
 import { spawn } from "child_process";
-import * as fs from "fs";
-import * as path from "path";
+import fs from "fs";
+import path from "path";
+import winston from "winston";
 
+export function getAiTextContent(response: Anthropic.Messages.Message): string {
+  return (
+    response.content
+      ?.filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("\n") || "(无文本响应)"
+  );
+}
+
+// ========================================= 日志 ============================================ //
+// 清空日志文件
+const logFile = "team-protocols.log";
+if (fs.existsSync(logFile)) {
+  fs.writeFileSync(logFile, "", "utf-8");
+}
+// 自定义格式化器：为"主"相关日志添加黄色，其他日志使用绿色
+const customColorFormat = winston.format((info) => {
+  // 检查消息中是否包含"主"
+  if (info.message && typeof info.message === "string" && info.message.includes("主")) {
+    info.message = `\x1b[33m${info.message}\x1b[0m`;
+  } else {
+    info.message = `\x1b[32m${info.message}\x1b[0m`;
+  }
+  return info;
+});
+// 配置 winston logger
+export const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || "info",
+  format: winston.format.combine(
+    winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
+    customColorFormat(),
+    winston.format.colorize(),
+    winston.format.printf(({ timestamp, level, message, ...meta }) => {
+      const metaStr = Object.keys(meta).length ? JSON.stringify(meta) : "";
+      return `${timestamp} [${level}] ${message} ${metaStr}`;
+    }),
+  ),
+  transports: [new winston.transports.Console(), new winston.transports.File({ filename: logFile })],
+});
+
+// ========================================= tools ============================================ //
 export const WORKDIR = process.cwd();
- 
+
 export function runBash(command: string): Promise<string> {
   const dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
   if (dangerous.some((d) => command.includes(d))) {
@@ -83,7 +126,7 @@ export function runEdit(filePath: string, oldText: string, newText: string): str
   }
 }
 
-// Agent 团队
+// ========================================= Agent 团队 ============================================ //
 export const TEAM_DIR = path.join(WORKDIR, ".team");
 export const INBOX_DIR = path.join(TEAM_DIR, "inbox");
 export const VALID_MSG_TYPES = new Set(["message", "broadcast", "shutdown_request", "shutdown_response", "plan_approval_response"]);
